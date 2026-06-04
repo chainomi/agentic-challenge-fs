@@ -4,10 +4,16 @@ on:
   push:
     branches:
       - main
-      - 'feature-*'
+      - 'feature/**'
   pull_request:
     branches:
       - main
+
+# REACT_APP_API_URL is read by Create React App at test/build time.
+# App.test.js asserts the rendered value equals this variable, so it must
+# be present for the test job (and is baked into the production build).
+env:
+  REACT_APP_API_URL: http://localhost:3001
 
 defaults:
   run:
@@ -23,7 +29,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '14'
+          node-version-file: codebase/rdicidr-0.1.0/.nvmrc
 
       - name: Install dependencies
         run: npm install
@@ -44,13 +50,18 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '14'
+          node-version-file: codebase/rdicidr-0.1.0/.nvmrc
 
       - name: Restore node_modules
+        id: restore
         uses: actions/cache/restore@v3
         with:
           path: codebase/rdicidr-0.1.0/node_modules
           key: node-modules-${{ hashFiles('codebase/rdicidr-0.1.0/package-lock.json') }}
+
+      - name: Install dependencies (cache miss fallback)
+        if: steps.restore.outputs.cache-hit != 'true'
+        run: npm install
 
       - name: Run linter
         run: npm run lint
@@ -59,29 +70,6 @@ jobs:
         run: npm run prettier
 
   test:
-    needs: [install]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out code
-        uses: actions/checkout@v3
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '14'
-
-      - name: Restore node_modules
-        uses: actions/cache/restore@v3
-        with:
-          path: codebase/rdicidr-0.1.0/node_modules
-          key: node-modules-${{ hashFiles('codebase/rdicidr-0.1.0/package-lock.json') }}
-
-      - name: Run tests
-        env:
-          CI: true
-        run: npm run test
-
-  build:
     needs: [lint]
     runs-on: ubuntu-latest
     steps:
@@ -91,13 +79,46 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '14'
+          node-version-file: codebase/rdicidr-0.1.0/.nvmrc
 
       - name: Restore node_modules
+        id: restore
         uses: actions/cache/restore@v3
         with:
           path: codebase/rdicidr-0.1.0/node_modules
-          key: deps-${{ hashFiles('codebase/rdicidr-0.1.0/package-lock.json') }}
+          key: node-modules-${{ hashFiles('codebase/rdicidr-0.1.0/package-lock.json') }}
+
+      - name: Install dependencies (cache miss fallback)
+        if: steps.restore.outputs.cache-hit != 'true'
+        run: npm install
+
+      - name: Run tests
+        env:
+          CI: true
+        run: npm run test
+
+  build:
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version-file: codebase/rdicidr-0.1.0/.nvmrc
+
+      - name: Restore node_modules
+        id: restore
+        uses: actions/cache/restore@v3
+        with:
+          path: codebase/rdicidr-0.1.0/node_modules
+          key: node-modules-${{ hashFiles('codebase/rdicidr-0.1.0/package-lock.json') }}
+
+      - name: Install dependencies (cache miss fallback)
+        if: steps.restore.outputs.cache-hit != 'true'
+        run: npm install
 
       - name: Build project
         run: npm run build
