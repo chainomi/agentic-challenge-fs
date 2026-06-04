@@ -1,6 +1,7 @@
 name: Terraform Dev
 
-# Dev infra/app changes only: plan on PRs into devel, build+push+apply on merge.
+# Dev environment CD. Auto-applies on BOTH pull requests into devel and pushes
+# to devel: build image -> push to ECR -> terraform apply (auto-approve).
 on:
   pull_request:
     branches: [devel]
@@ -10,6 +11,12 @@ on:
 permissions:
   id-token: write # assume the deploy role via GitHub OIDC
   contents: read
+
+# Serialize runs so concurrent PRs/pushes don't fight over the shared devel
+# state and infrastructure.
+concurrency:
+  group: terraform-dev
+  cancel-in-progress: false
 
 env:
   AWS_REGION: us-east-1
@@ -27,38 +34,8 @@ defaults:
     shell: bash
 
 jobs:
-  # ---- PR: validate + plan only (no changes applied) ----
-  plan:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-      - uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TF_VERSION }}
-      - name: Terraform fmt
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform fmt -check -recursive
-      - name: Terraform init
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform init -input=false -backend-config=${{ env.BACKEND }}
-      - name: Terraform validate
-        working-directory: ${{ env.TF_DIR }}
-        run: terraform validate -no-color
-      - name: Terraform plan
-        working-directory: ${{ env.TF_DIR }}
-        run: |
-          terraform plan -input=false -no-color \
-            -var-file=${{ env.TFVARS }} \
-            -var="container_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
-
-  # ---- Merge to devel: build the image and push it to ECR ----
+  # Build the app image and push it to ECR (tagged with the commit SHA).
   build-and-push:
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.build.outputs.image }}
@@ -85,9 +62,8 @@ jobs:
           docker push "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
 
-  # ---- Merge to devel: apply Terraform with the freshly pushed image ----
+  # Auto-apply Terraform with the freshly pushed image (runs on PR and on merge).
   deploy:
-    if: github.event_name == 'push'
     needs: [build-and-push]
     runs-on: ubuntu-latest
     steps:
@@ -99,9 +75,15 @@ jobs:
       - uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+      - name: Terraform fmt
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform fmt -check -recursive
       - name: Terraform init
         working-directory: ${{ env.TF_DIR }}
         run: terraform init -input=false -backend-config=${{ env.BACKEND }}
+      - name: Terraform validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate -no-color
       - name: Terraform apply
         working-directory: ${{ env.TF_DIR }}
         run: |
