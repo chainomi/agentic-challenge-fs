@@ -1,0 +1,125 @@
+name: Terraform Dev
+
+# Dev infra/app changes only: plan on PRs into devel, build+push+apply on merge.
+on:
+  pull_request:
+    branches: [devel]
+  push:
+    branches: [devel]
+
+permissions:
+  id-token: write # assume the deploy role via GitHub OIDC
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 488144151286.dkr.ecr.us-east-1.amazonaws.com
+  ECR_REPOSITORY: rdicidr
+  DEPLOY_ROLE_ARN: arn:aws:iam::488144151286:role/rdicidr-gha-deploy
+  TF_VERSION: 1.15.5
+  APP_DIR: codebase/rdicidr-0.1.0
+  TF_DIR: codebase/rdicidr-0.1.0/terraform
+  TFVARS: devel.tfvars
+  BACKEND: backend-devel.hcl
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # ---- PR: validate + plan only (no changes applied) ----
+  plan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Terraform fmt
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform fmt -check -recursive
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false -backend-config=${{ env.BACKEND }}
+      - name: Terraform validate
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform validate -no-color
+      - name: Terraform plan
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform plan -input=false -no-color \
+            -var-file=${{ env.TFVARS }} \
+            -var="container_image=${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+
+  # ---- Merge to devel: build the image and push it to ECR ----
+  build-and-push:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push image
+        id: build
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${GITHUB_SHA}"
+          docker build \
+            -t "$IMAGE" \
+            -t "${ECR_REGISTRY}/${ECR_REPOSITORY}:devel" \
+            -t "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest" \
+            .
+          docker push "$IMAGE"
+          docker push "${ECR_REGISTRY}/${ECR_REPOSITORY}:devel"
+          docker push "${ECR_REGISTRY}/${ECR_REPOSITORY}:latest"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
+  # ---- Merge to devel: apply Terraform with the freshly pushed image ----
+  deploy:
+    if: github.event_name == 'push'
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform init -input=false -backend-config=${{ env.BACKEND }}
+      - name: Terraform apply
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform apply -auto-approve -input=false -no-color \
+            -var-file=${{ env.TFVARS }} \
+            -var="container_image=${{ needs.build-and-push.outputs.image }}"
+      - name: Wait for ECS service to stabilize
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          CLUSTER=$(terraform output -raw cluster_name)
+          SERVICE=$(terraform output -raw ecs_service_name)
+          echo "Waiting for $SERVICE on $CLUSTER to reach steady state..."
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE"
+          echo "ECS service is stable."
+      - name: Deployment summary
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          URL=$(terraform output -raw app_url)
+          echo "### 🚀 Dev deployment complete" >> "$GITHUB_STEP_SUMMARY"
+          echo "- App URL: $URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Health: ${URL}/health" >> "$GITHUB_STEP_SUMMARY"

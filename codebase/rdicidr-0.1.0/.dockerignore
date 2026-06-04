@@ -1,0 +1,8 @@
+node_modules
+build
+.git
+.github
+terraform
+**/*.md
+.env*
+npm-debug.log

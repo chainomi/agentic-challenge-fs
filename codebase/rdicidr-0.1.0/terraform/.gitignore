@@ -1,0 +1,12 @@
+# Terraform working dirs and state — never commit these
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# Keep committed: .terraform.lock.hcl, *.tfvars, backend-*.hcl
